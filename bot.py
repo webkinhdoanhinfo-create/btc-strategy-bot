@@ -20,29 +20,21 @@ anthropic = Anthropic(api_key=ANTHROPIC_API_KEY)
 
 
 def fetch_prices():
+    """Lấy giá từ Binance API (không bị block)"""
     try:
-        url = "https://api.coingecko.com/api/v3/simple/price"
-        params = {
-            "ids": "bitcoin,ethereum",
-            "vs_currencies": "usd",
-            "include_24hr_change": "true",
-            "include_24hr_vol": "true",
-            "include_high_24h": "true",
-            "include_low_24h": "true",
-        }
-        r = requests.get(url, params=params, timeout=10)
-        data = r.json()
-        btc = data["bitcoin"]
-        eth = data["ethereum"]
+        btc_r = requests.get("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT", timeout=10)
+        eth_r = requests.get("https://api.binance.com/api/v3/ticker/24hr?symbol=ETHUSDT", timeout=10)
+        btc = btc_r.json()
+        eth = eth_r.json()
         return {
-            "btc_price": btc["usd"],
-            "btc_change": btc["usd_24h_change"],
-            "btc_high": btc["usd_24h_high"],
-            "btc_low": btc["usd_24h_low"],
-            "eth_price": eth["usd"],
-            "eth_change": eth["usd_24h_change"],
-            "eth_high": eth["usd_24h_high"],
-            "eth_low": eth["usd_24h_low"],
+            "btc_price": float(btc["lastPrice"]),
+            "btc_change": float(btc["priceChangePercent"]),
+            "btc_high": float(btc["highPrice"]),
+            "btc_low": float(btc["lowPrice"]),
+            "eth_price": float(eth["lastPrice"]),
+            "eth_change": float(eth["priceChangePercent"]),
+            "eth_high": float(eth["highPrice"]),
+            "eth_low": float(eth["lowPrice"]),
         }
     except Exception as e:
         logger.error(f"Lỗi fetch giá: {e}")
@@ -144,7 +136,7 @@ def main():
 
     scheduler = AsyncIOScheduler(timezone=pytz.timezone("Asia/Ho_Chi_Minh"))
     scheduler.add_job(
-        lambda: asyncio.create_task(scheduled_job(app.bot)),
+        lambda: asyncio.ensure_future(scheduled_job(app.bot)),
         trigger="cron",
         hour=7,
         minute=0,
