@@ -1,0 +1,5 @@
+anthropic==0.25.0
+python-telegram-bot==21.3
+apscheduler==3.10.4
+requests==2.31.0
+pytz==2024.1
