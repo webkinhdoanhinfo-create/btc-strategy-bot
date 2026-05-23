@@ -1,150 +1,154 @@
-import os
-import asyncio
 import logging
 import requests
-from datetime import datetime
-from anthropic import Anthropic
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from datetime import time
 import pytz
+
+BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
-CHAT_ID = os.environ.get("CHAT_ID")
+BINANCE_URL = "https://api.binance.com/api/v3/ticker/price"
 
-anthropic = Anthropic(api_key=ANTHROPIC_API_KEY)
-
-
-def fetch_prices():
-    """Lấy giá từ Binance API (không bị block)"""
+def get_price(symbol: str) -> float | None:
+    """Lấy giá từ Binance API với timeout và retry."""
     try:
-        btc_r = requests.get("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT", timeout=10)
-        eth_r = requests.get("https://api.binance.com/api/v3/ticker/24hr?symbol=ETHUSDT", timeout=10)
-        btc = btc_r.json()
-        eth = eth_r.json()
-        return {
-            "btc_price": float(btc["lastPrice"]),
-            "btc_change": float(btc["priceChangePercent"]),
-            "btc_high": float(btc["highPrice"]),
-            "btc_low": float(btc["lowPrice"]),
-            "eth_price": float(eth["lastPrice"]),
-            "eth_change": float(eth["priceChangePercent"]),
-            "eth_high": float(eth["highPrice"]),
-            "eth_low": float(eth["lowPrice"]),
-        }
-    except Exception as e:
-        logger.error(f"Lỗi fetch giá: {e}")
+        response = requests.get(
+            BINANCE_URL,
+            params={"symbol": symbol},
+            timeout=10
+        )
+        response.raise_for_status()
+        data = response.json()
+        return float(data["price"])
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout khi lấy giá {symbol}")
+        return None
+    except requests.exceptions.ConnectionError:
+        logger.error(f"Lỗi kết nối khi lấy giá {symbol}")
+        return None
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"HTTP error {e.response.status_code} khi lấy giá {symbol}")
+        return None
+    except (KeyError, ValueError) as e:
+        logger.error(f"Lỗi parse dữ liệu {symbol}: {e}")
         return None
 
+def format_price(price: float) -> str:
+    """Format giá với dấu phẩy ngàn."""
+    return f"{price:,.2f}"
 
-def generate_strategy(prices):
-    today = datetime.now(pytz.timezone("Asia/Ho_Chi_Minh")).strftime("%d/%m/%Y")
-    prompt = f"""Bạn là trader chuyên nghiệp phân tích crypto. Hôm nay là {today}.
-
-Dữ liệu giá hiện tại:
-- BTC: ${prices['btc_price']:,.0f} | 24h: {prices['btc_change']:+.2f}% | High: ${prices['btc_high']:,.0f} | Low: ${prices['btc_low']:,.0f}
-- ETH: ${prices['eth_price']:,.2f} | 24h: {prices['eth_change']:+.2f}% | High: ${prices['eth_high']:,.2f} | Low: ${prices['eth_low']:,.2f}
-
-Phân tích đa khung H4-D1-D3-W và lên kế hoạch giao dịch theo format (dùng emoji, ngắn gọn cho Telegram):
-
-📊 *CHIẾN LƯỢC NGÀY {today}*
-
-*BTC/USD* ${prices['btc_price']:,.0f}
-• Bias: [Bull/Bear/Neutral]
-• Range: $X – $X
-• 🟢 LONG: $X–$X | SL $X | TP $X
-• 🔴 SHORT: $X–$X | SL $X | TP $X
-• ⚠️ Tránh: $X–$X
-• Kịch bản: [mô tả ngắn]
-
-*ETH/USD* ${prices['eth_price']:,.2f}
-• Bias: [Bull/Bear/Neutral]
-• Range: $X – $X
-• 🟢 LONG: $X–$X | SL $X | TP $X
-• 🔴 SHORT: $X–$X | SL $X | TP $X
-• ⚠️ Tránh: $X–$X
-• Kịch bản: [mô tả ngắn]
-
-📌 *Lưu ý:*
-[2-3 điểm quan trọng]"""
-
-    message = anthropic.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1000,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return message.content[0].text
-
-
-async def send_strategy(bot, chat_id):
-    try:
-        await bot.send_message(chat_id=chat_id, text="⏳ Đang phân tích thị trường...")
-        prices = fetch_prices()
-        if not prices:
-            await bot.send_message(chat_id=chat_id, text="❌ Lỗi lấy giá. Thử lại sau.")
-            return
-        strategy = generate_strategy(prices)
-        await bot.send_message(chat_id=chat_id, text=strategy, parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"Lỗi: {e}")
-        await bot.send_message(chat_id=chat_id, text=f"❌ Lỗi: {str(e)}")
-
-
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
         "👋 *BTC/ETH Strategy Bot*\n\n"
         "/chienluoc – Phân tích ngay\n"
         "/gia – Xem giá hiện tại\n\n"
-        "Bot tự động gửi lúc *7:00 sáng* mỗi ngày.",
-        parse_mode="Markdown"
-    )
-
-
-async def cmd_chienluoc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_strategy(context.bot, update.effective_chat.id)
-
-
-async def cmd_gia(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    prices = fetch_prices()
-    if not prices:
-        await update.message.reply_text("❌ Không lấy được giá.")
-        return
-    text = (
-        f"💰 *Giá hiện tại*\n\n"
-        f"*BTC:* ${prices['btc_price']:,.0f} ({prices['btc_change']:+.2f}%)\n"
-        f"  H: ${prices['btc_high']:,.0f} | L: ${prices['btc_low']:,.0f}\n\n"
-        f"*ETH:* ${prices['eth_price']:,.2f} ({prices['eth_change']:+.2f}%)\n"
-        f"  H: ${prices['eth_high']:,.2f} | L: ${prices['eth_low']:,.2f}"
+        "Bot tự động gửi lúc *7:00 sáng* mỗi ngày."
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
+async def gia(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lệnh /gia - hiển thị giá BTC và ETH hiện tại."""
+    msg = await update.message.reply_text("⏳ Đang lấy giá...")
 
-async def scheduled_job(bot):
-    logger.info("Chạy scheduled 7:00 sáng...")
-    await send_strategy(bot, CHAT_ID)
+    btc = get_price("BTCUSDT")
+    eth = get_price("ETHUSDT")
 
+    if btc is None and eth is None:
+        await msg.edit_text("❌ Không lấy được giá. Vui lòng thử lại sau.")
+        return
+
+    lines = ["💰 *Giá hiện tại*\n"]
+    if btc:
+        lines.append(f"• BTC: `${format_price(btc)}`")
+    else:
+        lines.append("• BTC: ❌ Không lấy được")
+
+    if eth:
+        lines.append(f"• ETH: `${format_price(eth)}`")
+    else:
+        lines.append("• ETH: ❌ Không lấy được")
+
+    await msg.edit_text("\n".join(lines), parse_mode="Markdown")
+
+async def chienluoc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lệnh /chienluoc - phân tích đơn giản dựa trên giá."""
+    msg = await update.message.reply_text("⏳ Đang phân tích thị trường...")
+
+    btc = get_price("BTCUSDT")
+    eth = get_price("ETHUSDT")
+
+    if btc is None or eth is None:
+        await msg.edit_text("❌ Lỗi lấy giá. Thử lại sau.")
+        return
+
+    # Tỉ lệ ETH/BTC
+    ratio = eth / btc * 100
+
+    # Phân tích đơn giản
+    if btc > 100000:
+        btc_signal = "🟢 BTC đang ở vùng cao – cân nhắc chốt lời một phần"
+    elif btc > 80000:
+        btc_signal = "🟡 BTC đang ở vùng trung bình – giữ vị thế"
+    else:
+        btc_signal = "🔴 BTC đang ở vùng thấp – cơ hội tích lũy"
+
+    if ratio > 5:
+        eth_signal = "🟢 ETH mạnh hơn BTC – ETH đang dẫn dắt"
+    elif ratio > 3:
+        eth_signal = "🟡 ETH theo sát BTC"
+    else:
+        eth_signal = "🔴 ETH yếu hơn BTC"
+
+    text = (
+        f"📊 *Phân tích thị trường*\n\n"
+        f"• BTC: `${format_price(btc)}`\n"
+        f"• ETH: `${format_price(eth)}`\n"
+        f"• Tỉ lệ ETH/BTC: `{ratio:.2f}%`\n\n"
+        f"{btc_signal}\n"
+        f"{eth_signal}"
+    )
+    await msg.edit_text(text, parse_mode="Markdown")
+
+async def gui_bao_cao_sang(context: ContextTypes.DEFAULT_TYPE):
+    """Gửi báo cáo tự động lúc 7:00 sáng."""
+    chat_id = context.job.chat_id
+
+    btc = get_price("BTCUSDT")
+    eth = get_price("ETHUSDT")
+
+    if btc is None or eth is None:
+        await context.bot.send_message(chat_id, "❌ Không lấy được giá sáng nay.")
+        return
+
+    text = (
+        f"🌅 *Báo cáo sáng – BTC/ETH*\n\n"
+        f"• BTC: `${format_price(btc)}`\n"
+        f"• ETH: `${format_price(eth)}`\n\n"
+        f"Gõ /chienluoc để xem phân tích đầy đủ."
+    )
+    await context.bot.send_message(chat_id, text, parse_mode="Markdown")
 
 def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("chienluoc", cmd_chienluoc))
-    app.add_handler(CommandHandler("gia", cmd_gia))
+    app = Application.builder().token(BOT_TOKEN).build()
 
-    scheduler = AsyncIOScheduler(timezone=pytz.timezone("Asia/Ho_Chi_Minh"))
-    scheduler.add_job(
-        lambda: asyncio.ensure_future(scheduled_job(app.bot)),
-        trigger="cron",
-        hour=7,
-        minute=0,
-    )
-    scheduler.start()
-    logger.info("Bot khởi động. Scheduler 7:00 sáng VN.")
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("gia", gia))
+    app.add_handler(CommandHandler("chienluoc", chienluoc))
+
+    # Lên lịch gửi 7:00 sáng mỗi ngày (múi giờ VN)
+    # Thay YOUR_CHAT_ID bằng chat_id của bạn
+    # app.job_queue.run_daily(
+    #     gui_bao_cao_sang,
+    #     time=time(7, 0, tzinfo=pytz.timezone("Asia/Ho_Chi_Minh")),
+    #     chat_id=YOUR_CHAT_ID
+    # )
+
+    logger.info("Bot đang chạy...")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
